@@ -27,16 +27,38 @@ var Util = {
     }
   }
   return a;
+  },
+  pointInBoundingBox:function(pt, box) {
+    return ((box.x <= pt.x && pt.x <= box.x + box.width) &&
+            (box.y <= pt.y && pt.y <= box.y + box.height));
   }
+
 };
 
-var Antibiotics = { Penicillin: 50, Ciprofloxacin: 200 };
-var Condition = { continuing: 0, failed: 1, success: 2, antibioticUnlocked: 3 };
+//var Antibiotics = { Penicillin: 50, Ciprofloxacin: 200 };
+var Antibiotics = { Penicillin: 1, Ciprofloxacin: 5 };
+var Condition = { level: 0, failed: 1, success: 2, antibioticUnlocked: 3 };
 
+//
+// A word on the gameState object
+//
+// The progression through the game can be thought of as a finite state machine (FSM)
+// You are either
+//   a) playing a level
+//   b) looking at a success message
+//   c) looking at a failure message
+//   d) looking at a "antibiotic unlocked" message
+//
+// The current state in the FSM is denoted by the "condition" field of
+// the gameState object. This is the macro-state of the game.
+//
+// The sub-state of each FSM-state is stored in the field "subState". This object is
+// different for each substate [ a) - d) above ]
+//
 var GameLayer = (function () {
   var that, // 'that' is assigned the value 'this' at initialization time so that methods
             // from the super class can be called.
-      helloLabel, space, // "space" is the Chipmunk physics space
+      titleLabel, space, // "space" is the Chipmunk physics space
       debugNode, size, spaceDim, gameState,
       averageGermSize,
       averageDoublingPeriod = 3, // in seconds
@@ -48,20 +70,27 @@ var GameLayer = (function () {
       return "(" + Math.round(r*100.0) + "%)";
   };
 
+  var cleanUpOldGameState = function() {
+    if (gameState) {
+      if (gameState.condition === Condition.success ||
+          gameState.condition === Condition.failure) {
+        that.removeChild(gameState.subState.messageNode);
+      }
+    }
+  };
+
   var initGameState = function(startingGerms) {
     var i, props = Util.propertiesOf(Antibiotics);
-    if (gameState && gameState.messageNode) {
-      that.removeChild(gameState.messageNode);
-    }
+    cleanUpOldGameState();
     gameState = { score: 0,
                   currentLevel: 1,
-                  messageNode: null,
-                  resistances: {},
-                  condition: Condition.continuing,
-                  levelState: {} // this needs to be initialised by function startLevel
+                  antibiotics: {},
+                  condition: Condition.level,
+                  subState: {}
                 };
     for (i in props) {
-      gameState.resistances[props[i]] = 0.10; // initial resistance chance of 0.10
+      // initial resistance chance of 0.10
+      gameState.antibiotics[props[i]] = { enabled: false, resistance: 0.10 } ;
     }
 
     // FIXME: Create some antibiotic labels and attach the resistance to them.
@@ -99,14 +128,14 @@ var GameLayer = (function () {
   var antibioticResistances = function() {
     var i, resistances = {}, props = Util.propertiesOf(Antibiotics);
     for (i in props) {
-      resistances[props[i]] = (Math.random() < gameState.resistances[props[i]]) ? true : false;
+      resistances[props[i]] = (Math.random() < gameState.antibiotics[props[i]].resistance) ? true : false;
     };
     return resistances;
   };
   
   var multiplyGerms = function() {
-    var pos, i, levelState = gameState.levelState,
-        shapes = levelState.germShapes, count = 0, userData, s, b, t, r, deleted, toDelete = [];
+    var pos, i, subState = gameState.subState,
+        shapes = subState.germShapes, count = 0, userData, s, b, t, r, deleted, toDelete = [];
 
     for (i in shapes) {
       count += 1;
@@ -118,7 +147,7 @@ var GameLayer = (function () {
         gameState.condition = Condition.failed;
       }
 
-      if (levelState.step === userData.multiplyAt) {
+      if (subState.step === userData.multiplyAt) {
         pos = b.getPos();
         r = s.getRadius()/2; // half the size it is now
 
@@ -140,7 +169,7 @@ var GameLayer = (function () {
   };
 
   var growGerms = function() {
-    var i, germs = gameState.levelState.germShapes, body, userData;
+    var i, germs = gameState.subState.germShapes, body, userData;
     var replaceWithLarger = function(i, shape) {
       var body     = shape.body,
           userData = body.getUserData(),
@@ -162,21 +191,21 @@ var GameLayer = (function () {
         body  = cp.Body(mass, cp.momentForCircle(mass, 0, o.r, cp.vzero)),
         shape = cp.CircleShape(body, o.r, cp.vzero),
         t = randomMultiplyTime(),
-        levelState = gameState.levelState,
-        germData = { germId: (levelState.nextGermId += 1),
-                     multiplyAt: levelState.step + t,
+        subState = gameState.subState,
+        germData = { germId: (subState.nextGermId += 1),
+                     multiplyAt: subState.step + t,
                      growthRate: growthRateForSteps(t),
                      resistances: (o.resistances || antibioticResistances())};
     body.setPos(cp.v(o.x, o.y));
     body.setUserData(germData);
-    levelState.germShapes.push(shape);
+    subState.germShapes.push(shape);
     space.addShape(shape);
     space.addBody(body);
   };
   
   // debug function to check states of germs
   var checkInvariant = function() {
-    var i, ss, u, ls = gameState.levelState;
+    var i, ss, u, ls = gameState.subState;
     for (i in (ss = ls.germShapes) ) {
       u = ss[i].body.getUserData();
       if (ls.step > u.multiplyAt) {
@@ -197,13 +226,11 @@ var GameLayer = (function () {
     }
   };
 
-  var startLevel = function(startingGerms) {
-    gameState.levelState = { germShapes: [],
+  var initLevel = function(startingGerms) {
+    cleanUpOldGameState();
+    gameState.subState = { germShapes: [],
                              nextGermId: 0,
                              step: 0 };
-    if (gameState.messageNode) {
-      that.removeChild(gameState.messageNode);
-    }
     createGerms(startingGerms);
     that.schedule(update,1/stepsInSecond);
   };
@@ -233,7 +260,7 @@ var GameLayer = (function () {
   };
   
   var removeGermWithId = function(germId) {
-    var i, ss = gameState.levelState.germShapes, b, u;
+    var i, ss = gameState.subState.germShapes, b, u;
     for (i in ss) {
       b = ss[i].body;
       u = b.getUserData();
@@ -241,19 +268,15 @@ var GameLayer = (function () {
         space.removeBody(b);
         space.removeShape(ss[i]);
         ss.splice(i,1);
-        if (gameState.levelState.germShapes.length === 0) {
-          gameState.condition = Condition.success;
-        }
         break;
       }
     }
-
   };
 
   // onTouchesBegan is one of the events enabled by "enableEvents"
   var touchHandler = function(touches, event) {
-    var i, loc, shape, ss;
-      if (gameState.condition === Condition.continuing) {
+    var i, loc, shape, ss, boundingBox;
+    if (gameState.condition === Condition.level) {
       for (i in touches) {
         loc = touches[i].getLocation();
         // See if there is collision with germ
@@ -263,17 +286,68 @@ var GameLayer = (function () {
           removeGermWithId(u.germId);
           gameState.score += 1;
         }
+      
+        // FIXME: Check antibiotic is being pressed
+
       }
     } else if (gameState.condition === Condition.success) {
-      gameState.condition = Condition.continuing;
-      startLevel(gameState.currentLevel += 1);
+
+      initLevel(gameState.currentLevel += 1);
+      gameState.condition = Condition.level;
+
     } else if (gameState.condition === Condition.failed) {
-      for (i in (ss = gameState.levelState.germShapes)) {
+      for (i in (ss = gameState.subState.germShapes)) {
         space.removeBody(ss[i].body);
         space.removeShape(ss[i]);
       }
       initGameState();
-      startLevel(gameState.currentLevel);
+      initLevel(gameState.currentLevel);
+      gameState.condition = Condition.level;
+    } else if (gameState.condition === Condition.antibioticUnlocked) {
+      for (i in touches) {
+        loc = touches[i].getLocation();
+        boundingBox = gameState.subState.clickNode.getBoundingBox();
+        if ( Util.pointInBoundingBox(loc, boundingBox) ) {
+          that.removeChild(gameState.subState.parentNode);
+          // FIXME: show antibiotic labels.
+          gameState.condition = Condition.level;
+          gameState.subState = gameState.subState.levelState;
+          cc.logProperties(gameState.subState);
+        }
+      }
+    }
+  };
+  
+  var checkAndEnableAntibiotics = function() {
+    var i, props = Util.propertiesOf(Antibiotics), el, message,
+        parentNode, enabledMessageNode, clickNode, ab;
+    for (i in props) {
+      ab = gameState.antibiotics[props[i]];
+      if (!ab.enabled && gameState.score >= Antibiotics[props[i]]) {
+        ab.enabled = true;
+
+        parentNode = cc.Node();
+        message = ("Antibiotic "+ props[i] +" enabled!\n" +
+             "The percentage next to the antibiotic is the germ\'s natural chance of immunity.\n" +
+             "Each use of an antibiotic will increase the chance of immunity\n" +
+             "in subsequent levels. Use sparingly!");
+
+        enabledMessageNode = cc.LabelTTF.create(message, "Helvetica", size.width/50);
+        enabledMessageNode.setPosition(cc.p(size.width/2, size.height*10/16));
+
+        clickNode = cc.LabelTTF.create("Tap here to continue", "Helvetica", size.width/60);
+        clickNode.setPosition(cc.p(size.width/2, size.height*7/16));
+
+        parentNode.addChild(enabledMessageNode);
+        parentNode.addChild(clickNode);
+        
+        that.addChild(parentNode,0);
+
+        gameState.condition = Condition.antibioticUnlocked;
+        gameState.subState = { parentNode: parentNode, clickNode: clickNode,
+                               // save the level state
+                               levelState: gameState.subState } ;
+      }
     }
   };
   
@@ -281,8 +355,10 @@ var GameLayer = (function () {
     var node, label, touchLabel;
     node = cc.Node();
 
-    label = cc.LabelTTF.create("Fail!", "Helvetica", 40);
+    label = cc.LabelTTF.create("Infected!", "Helvetica", 40);
     label.setPosition(cc.p(size.width/2, size.height/2));
+    label.setColor(cc.RED); // or { r: <0-255>, g: <0-255>, b: <0-255> }
+
     touchLabel = cc.LabelTTF.create("Touch to continue", "Helvetica", 20);
     touchLabel.setPosition(cc.p(size.width/2, size.height*7/16));
 
@@ -290,16 +366,16 @@ var GameLayer = (function () {
     node.addChild(touchLabel);
     that.addChild(node,0);
     
-    gameState.messageNode = node;
+    gameState.subState = { messageNode: node } ;
   };
 
   var successMessage = function() {
     var node, label, touchLabel;
 
     node = cc.Node();
-
     label = cc.LabelTTF.create("Epidemic averted!", "Helvetica", 40);
     label.setPosition(cc.p(size.width/2, size.height/2));
+    label.setColor(cc.GREEN); // or { r: <0-255>, g: <0-255>, b: <0-255> }
     touchLabel = cc.LabelTTF.create("Touch to continue", "Helvetica", 20);
     touchLabel.setPosition(cc.p(size.width/2, size.height*7/16));
 
@@ -307,18 +383,21 @@ var GameLayer = (function () {
     node.addChild(touchLabel);
     that.addChild(node,0);
     
-    gameState.messageNode = node;
+    gameState.subState = { messageNode: node } ;
   };
 
   var update = function(dt) {
-    // this.checkInvariant();
-
+    checkAndEnableAntibiotics();
     switch (gameState.condition) {
-      case Condition.continuing:
-        space.step(1/stepsInSecond);
-        gameState.levelState.step += 1;
-        multiplyGerms();
-        growGerms();
+      case Condition.level:
+        if (gameState.subState.germShapes.length === 0) {
+          gameState.condition = Condition.success;
+        } else {
+          space.step(1/stepsInSecond);
+          gameState.subState.step += 1;
+          multiplyGerms();
+          growGerms();
+        }
         break;
       case Condition.failed:
         that.unschedule(update);
@@ -327,6 +406,8 @@ var GameLayer = (function () {
       case Condition.success:
         that.unschedule(update);
         successMessage();
+        break;
+      case Condition.antibioticUnlocked:
         break;
     }
   };
@@ -349,11 +430,11 @@ var GameLayer = (function () {
       spaceDim = { height: 30 }; // 30m in height
       spaceDim.width = (spaceDim.height / size.height * size.width);
 
-      helloLabel = cc.LabelTTF.create("Epidemic", "Helvetica", 38);
+      titleLabel = cc.LabelTTF.create("Epidemic", "Helvetica", 38);
       // position the label on the center of the screen
-      helloLabel.setPosition(cc.p(size.width / 2, size.height - 40));
+      titleLabel.setPosition(cc.p(size.width / 2, size.height - 40));
       // add the label as a child to this layer
-      that.addChild(helloLabel, 0);
+      that.addChild(titleLabel, 0);
 
       initPhysics();
       averageGermSize = size.height * 1/40;
@@ -364,7 +445,7 @@ var GameLayer = (function () {
                     wallWidth: size.height/40});
 
       initGameState(); // initialise the global game state
-      startLevel(1);
+      initLevel(1);
       return true;
     },
     onTouchesBegan: touchHandler
