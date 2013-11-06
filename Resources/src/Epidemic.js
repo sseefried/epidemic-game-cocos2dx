@@ -35,9 +35,62 @@ var Util = {
 
 };
 
-//var Antibiotics = { Penicillin: 50, Ciprofloxacin: 200 };
-var Antibiotics = { Penicillin: 1, Ciprofloxacin: 5 };
-var Condition = { level: 0, failed: 1, success: 2, antibioticUnlocked: 3 };
+
+/*
+ * It is always touch events that advance our state.
+ *
+ * But we have to schedule/unschedule the update function
+ * for the "level" state.
+ *
+ */
+
+
+var FSM = function(selector, spec) {
+  
+  /*
+    spec =
+      <eventType1>:
+        {
+          <state1>: { unconditional: ...,
+                      conditionals: [ { transition: ..., nextState: ... }
+                                    , { transition: ..., nextState: ... } ]
+   
+          <state2>: ...  
+        },
+      <eventType2>: { ... }
+    }
+  
+    The transition function is of the form 
+    function(obj, eventType) { ... }
+    
+    It should check whether the transition should occur. If the transition should occur
+    'obj' should be updated as necessary and "true" should be returned. Otherwise,
+    the function should return 'false'
+
+  */
+
+  // Call the function returned to advance the FSM
+  return (function(obj, eventType) {
+    var i, ts, state = obj[selector], transitions;
+
+    transitions = spec[eventType];
+
+    if ( transitions[state].unconditional ) {
+      transitions[state].unconditional(obj);
+    }
+
+    for (i in ts = transitions[state].conditionals ) {
+      if ( ts[i].transition(obj) ) {
+        obj[selector] = ts[i].nextState
+      }
+    }
+  });
+  
+};
+
+
+var Antibiotics = { Penicillin: 50, Ciprofloxacin: 200 };
+// var Antibiotics = { Penicillin: 1, Ciprofloxacin: 5 };
 
 //
 // A word on the gameState object
@@ -63,29 +116,20 @@ var GameLayer = (function () {
       averageGermSize,
       averageDoublingPeriod = 3, // in seconds
       stepsInSecond = 30,
-      resistanceIncrease = 1.1;
+      resistanceIncrease = 1.1,
+      fsmHandler; // Finite State Machine handler. To be called on every touch event
 
   // private functions
   var resistanceString = function(r) {
       return "(" + Math.round(r*100.0) + "%)";
   };
 
-  var cleanUpOldGameState = function() {
-    if (gameState) {
-      if (gameState.condition === Condition.success ||
-          gameState.condition === Condition.failure) {
-        that.removeChild(gameState.subState.messageNode);
-      }
-    }
-  };
-
   var initGameState = function(startingGerms) {
     var i, props = Util.propertiesOf(Antibiotics);
-    cleanUpOldGameState();
     gameState = { score: 0,
                   currentLevel: 1,
                   antibiotics: {},
-                  condition: Condition.level,
+                  fsmState: "level",
                   subState: {}
                 };
     for (i in props) {
@@ -143,10 +187,6 @@ var GameLayer = (function () {
       b = s.body;
       userData = b.getUserData();
 
-      if (b.getPos().y > size.height*5/6) {
-        gameState.condition = Condition.failed;
-      }
-
       if (subState.step === userData.multiplyAt) {
         pos = b.getPos();
         r = s.getRadius()/2; // half the size it is now
@@ -203,20 +243,6 @@ var GameLayer = (function () {
     space.addBody(body);
   };
   
-  // debug function to check states of germs
-  var checkInvariant = function() {
-    var i, ss, u, ls = gameState.subState;
-    for (i in (ss = ls.germShapes) ) {
-      u = ss[i].body.getUserData();
-      if (ls.step > u.multiplyAt) {
-        cc.log("Germ at index " + i + " has multiplyAt " + u.multiplyAt +
-                ". Current step is " + ls.step);
-        cc.logObject(u);
-        gameState.condition = Condition.failed;
-      }
-    }
-  };
-
   var createGerms = function(n) {
     var i, s = size;
     for (i=0; i < n; i++) {
@@ -227,7 +253,6 @@ var GameLayer = (function () {
   };
 
   var initLevel = function(startingGerms) {
-    cleanUpOldGameState();
     gameState.subState = { germShapes: [],
                              nextGermId: 0,
                              step: 0 };
@@ -273,84 +298,11 @@ var GameLayer = (function () {
     }
   };
 
-  // onTouchesBegan is one of the events enabled by "enableEvents"
   var touchHandler = function(touches, event) {
-    var i, loc, shape, ss, boundingBox;
-    if (gameState.condition === Condition.level) {
-      for (i in touches) {
-        loc = touches[i].getLocation();
-        // See if there is collision with germ
-        shape = space.pointQueryFirst(cp.v(loc.x, loc.y), cp.ALL_LAYERS, cp.NO_GROUP);
-        if (shape) {
-          u = shape.body.getUserData()
-          removeGermWithId(u.germId);
-          gameState.score += 1;
-        }
-      
-        // FIXME: Check antibiotic is being pressed
-
-      }
-    } else if (gameState.condition === Condition.success) {
-
-      initLevel(gameState.currentLevel += 1);
-      gameState.condition = Condition.level;
-
-    } else if (gameState.condition === Condition.failed) {
-      for (i in (ss = gameState.subState.germShapes)) {
-        space.removeBody(ss[i].body);
-        space.removeShape(ss[i]);
-      }
-      initGameState();
-      initLevel(gameState.currentLevel);
-      gameState.condition = Condition.level;
-    } else if (gameState.condition === Condition.antibioticUnlocked) {
-      for (i in touches) {
-        loc = touches[i].getLocation();
-        boundingBox = gameState.subState.clickNode.getBoundingBox();
-        if ( Util.pointInBoundingBox(loc, boundingBox) ) {
-          that.removeChild(gameState.subState.parentNode);
-          // FIXME: show antibiotic labels.
-          gameState.condition = Condition.level;
-          gameState.subState = gameState.subState.levelState;
-          cc.logProperties(gameState.subState);
-        }
-      }
-    }
+     gameState.touches = touches;
+     fsmHandler(gameState, "touch");
   };
-  
-  var checkAndEnableAntibiotics = function() {
-    var i, props = Util.propertiesOf(Antibiotics), el, message,
-        parentNode, enabledMessageNode, clickNode, ab;
-    for (i in props) {
-      ab = gameState.antibiotics[props[i]];
-      if (!ab.enabled && gameState.score >= Antibiotics[props[i]]) {
-        ab.enabled = true;
 
-        parentNode = cc.Node();
-        message = ("Antibiotic "+ props[i] +" enabled!\n" +
-             "The percentage next to the antibiotic is the germ\'s natural chance of immunity.\n" +
-             "Each use of an antibiotic will increase the chance of immunity\n" +
-             "in subsequent levels. Use sparingly!");
-
-        enabledMessageNode = cc.LabelTTF.create(message, "Helvetica", size.width/50);
-        enabledMessageNode.setPosition(cc.p(size.width/2, size.height*10/16));
-
-        clickNode = cc.LabelTTF.create("Tap here to continue", "Helvetica", size.width/60);
-        clickNode.setPosition(cc.p(size.width/2, size.height*7/16));
-
-        parentNode.addChild(enabledMessageNode);
-        parentNode.addChild(clickNode);
-        
-        that.addChild(parentNode,0);
-
-        gameState.condition = Condition.antibioticUnlocked;
-        gameState.subState = { parentNode: parentNode, clickNode: clickNode,
-                               // save the level state
-                               levelState: gameState.subState } ;
-      }
-    }
-  };
-  
   var failureMessage = function() {
     var node, label, touchLabel;
     node = cc.Node();
@@ -366,7 +318,7 @@ var GameLayer = (function () {
     node.addChild(touchLabel);
     that.addChild(node,0);
     
-    gameState.subState = { messageNode: node } ;
+    return node;
   };
 
   var successMessage = function() {
@@ -383,34 +335,198 @@ var GameLayer = (function () {
     node.addChild(touchLabel);
     that.addChild(node,0);
     
-    gameState.subState = { messageNode: node } ;
+    return node;
   };
 
+  // This function should only be "scheduled" when gameState.condition === Condition.level
   var update = function(dt) {
-    checkAndEnableAntibiotics();
-    switch (gameState.condition) {
-      case Condition.level:
-        if (gameState.subState.germShapes.length === 0) {
-          gameState.condition = Condition.success;
-        } else {
-          space.step(1/stepsInSecond);
-          gameState.subState.step += 1;
-          multiplyGerms();
-          growGerms();
+    space.step(1/stepsInSecond);
+    multiplyGerms();
+    growGerms();
+    gameState.subState.step += 1;
+    fsmHandler(gameState, "levelStep");
+  }
+
+  var getFSMHandler = function() {
+
+    var killGermsUnderTouches = function(gameState) {
+      var i, ts, loc;
+      for ( i in ts = gameState.touches ) {
+        loc = ts[i].getLocation();
+        // See if there is collision with germ
+        shape = space.pointQueryFirst(cp.v(loc.x, loc.y), cp.ALL_LAYERS, cp.NO_GROUP);
+        if (shape) {
+          u = shape.body.getUserData()
+          removeGermWithId(u.germId);
+          gameState.score += 1;
         }
-        break;
-      case Condition.failed:
+      }
+    };
+
+    var tooManyGerms = function(gameState) {
+      var i, gs, msgNode;
+
+      for (i in gs = gameState.subState.germShapes ) {
+        if ( gs[i].body.getPos().y > size.height * 5/6 ) {
+          that.unschedule(update);
+          msgNode = failureMessage();
+          gameState.subState = { messageNode: msgNode, levelState: gameState.subState };
+          return true;
+        }
+      }
+      return false;
+    };
+
+    var antibioticUnlockedTransition = function(gameState) {
+      var i, as = Util.propertiesOf(Antibiotics);
+
+      for (i in as) {
+        ab = gameState.antibiotics[as[i]];
+        if (!ab.enabled && gameState.score >= Antibiotics[as[i]]) {
+          ab.enabled = true;
+
+          parentNode = cc.Node();
+          message = ("Antibiotic "+ as[i] +" enabled!\n" +
+               "The percentage next to the antibiotic is the germ\'s natural chance of immunity.\n" +
+               "Each use of an antibiotic will increase the chance of immunity\n" +
+               "in subsequent levels. Use sparingly!");
+
+          enabledMessageNode = cc.LabelTTF.create(message, "Helvetica", size.width/50);
+          enabledMessageNode.setPosition(cc.p(size.width/2, size.height*10/16));
+
+          clickNode = cc.LabelTTF.create("Tap here to continue", "Helvetica", size.width/60);
+          clickNode.setPosition(cc.p(size.width/2, size.height*7/16));
+
+          parentNode.addChild(enabledMessageNode);
+          parentNode.addChild(clickNode);
+          
+          that.addChild(parentNode,0);
+
+          gameState.subState = { parentNode: parentNode,
+                                 clickNode: clickNode,
+                                 // save the level state
+                                 levelState: gameState.subState } ;
+          return true;
+        }
+      }
+      return false;
+    };
+    
+    var germKilledTransition = function(gameState) {
+      return (gameState.subState.germShapes.length > 0);
+    };
+
+    var lastGermKilledTransition = function(gameState) {
+      var msgNode;
+      if ( gameState.subState.germShapes.length === 0 ) {
         that.unschedule(update);
-        failureMessage();
-        break;
-      case Condition.success:
-        that.unschedule(update);
-        successMessage();
-        break;
-      case Condition.antibioticUnlocked:
-        break;
+        msgNode = successMessage();
+        gameState.subState = { messageNode: msgNode };
+        return true;
+      }
+      return false;
+    };
+    
+     
+    // Precondition: Expects 'subState' field to contain 'messageNode' field
+    var newGameTransition = function(gameState) {
+      that.removeChild(gameState.subState.messageNode);
+      for (i in (ss = gameState.subState.levelState.germShapes)) {
+        space.removeBody(ss[i].body);
+        space.removeShape(ss[i]);
+      }
+      initGameState();
+      initLevel(gameState.currentLevel);
+      return true;
+    };
+
+    var nextLevelTransition = function(gameState) {
+      that.removeChild(gameState.subState.messageNode);
+      initLevel(gameState.currentLevel += 1);
+      return true;
+    };
+    
+    var continueTapped = function(gameState) {
+      var i, ts, loc, boundingBox;
+      for ( i in ts = gameState.touches ) {
+        loc = ts[i].getLocation();
+        boundingBox = gameState.subState.clickNode.getBoundingBox();
+        return (Util.pointInBoundingBox(loc, boundingBox) );
+      }
+      return false;
     }
+
+    var noGermsLeftTransition = function(gameState) {
+      if ( continueTapped(gameState) && gameState.subState.levelState.germShapes.length === 0 ) {
+        that.removeChild(gameState.subState.parentNode);
+        successMessage();
+        return true;
+      }
+      return false;
+    };
+    
+    var continueLevelTransition = function(gameState) {
+      if ( continueTapped(gameState) && gameState.substate.levelState.germShapes.length > 0 ) {
+        gameState.subState = gameState.substate.levelState;
+        return true;
+      }
+      return false;
+    };
+
+    //
+    // The Finite State Machine is fully specified here.
+    //
+    return FSM("fsmState", {
+      "levelStep":
+        { "level": { conditionals: [ { transition: tooManyGerms,
+                                       nextState: "failed"
+                                      }]
+                   }
+        },
+      "touch":
+        {
+          "level":
+            { unconditional: killGermsUnderTouches,
+              conditionals:
+                [ { transition: antibioticUnlockedTransition,
+                    nextState:  "antibioticUnlocked"
+                  },
+                  { transition: germKilledTransition,
+                    nextState:  "level"
+                  },
+                  { transition: lastGermKilledTransition,
+                    nextState:  "success"
+                  }
+                ]
+            },
+          "failed":
+            { conditionals:
+                [ { transition: newGameTransition,
+                    nextState:  "level"
+                  }
+                ]
+            },
+          "success":
+            { conditionals:
+                [ { transition: nextLevelTransition,
+                    nextState:  "level"
+                  }
+                ]
+            },
+          "antibioticUnlocked":
+            { conditionals:
+                [ { transition:  noGermsLeftTransition,
+                    nextState:   "success"
+                  },
+                  { transition: continueLevelTransition,
+                    nextState:  "level"
+                  }
+                ]
+            }
+        }
+    });
   };
+
 
   return cc.Layer.extend({
     // public functions
@@ -444,8 +560,10 @@ var GameLayer = (function () {
                     height:    size.height*2/3,
                     wallWidth: size.height/40});
 
-      initGameState(); // initialise the global game state
-      initLevel(1);
+      initGameState();
+      initLevel(gameState.currentLevel);
+      fsmHandler = getFSMHandler();
+
       return true;
     },
     onTouchesBegan: touchHandler
