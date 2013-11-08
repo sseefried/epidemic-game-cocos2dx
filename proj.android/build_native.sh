@@ -38,6 +38,7 @@ set -e
 
 # paths
 
+
 if [ -z "${NDK_ROOT+aaa}" ];then
 echo "please define NDK_ROOT"
 exit 1
